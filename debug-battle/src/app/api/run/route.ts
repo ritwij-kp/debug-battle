@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { headers } from 'next/headers';
-import { handleCodeExecution } from './utils';
+import { createFullProgram, compileCpp, runExecutable } from './utils';
 
 export async function POST(request: Request) {
     try {
@@ -9,8 +9,14 @@ export async function POST(request: Request) {
         
         const { code, input } = await request.json();
         
-        // Execute the code using our new handler
-        const output = await handleCodeExecution(code, input);
+        // Create a complete program for this test case
+        const fullProgram = createFullProgram(code, input);
+        
+        // Compile the program
+        const executablePath = await compileCpp(fullProgram);
+        
+        // Run the program
+        const output = await runExecutable(executablePath);
         
         return NextResponse.json({ success: true, output });
     } catch (error: any) {

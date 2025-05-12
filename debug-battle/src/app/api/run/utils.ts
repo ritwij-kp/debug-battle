@@ -1,22 +1,54 @@
 import { writeFile, unlink } from 'node:fs/promises';
+import { exec } from 'node:child_process';
 import { promisify } from 'node:util';
+import { randomBytes } from 'node:crypto';
+import path from 'node:path';
+
+const execAsync = promisify(exec);
 
 // Convert JSON array to C++ vector initialization
 function formatArrayToCpp(input: string): string {
     try {
-        const array = JSON.parse(input);
-        if (Array.isArray(array)) {
-            if (typeof array[0] === 'string') {
-                // For char arrays (string reversal problem)
-                return `vector<char> s = {${array.map(c => `'${c}'`).join(', ')}};`;
-            } else {
-                // For number arrays
-                return `vector<int> nums = {${array.join(', ')}};`;
+        // Handle binary search format with array and target
+        if (input.includes('target =')) {
+            const [arrayPart, targetPart] = input.split('target =').map(s => s.trim());
+            const cleanArrayPart = arrayPart.replace(/,$/, '').trim(); // Remove trailing comma
+            const array = JSON.parse(cleanArrayPart);
+            const target = parseInt(targetPart);
+            
+            if (!Array.isArray(array)) {
+                throw new Error('First part must be an array');
             }
+            
+            if (isNaN(target)) {
+                throw new Error('Target must be a number');
+            }
+            
+            return `vector<int> nums = {${array.join(', ')}};\nint target = ${target};`;
         }
-        throw new Error('Input is not an array');
+        
+        // Handle regular array input (for other problems)
+        const cleanInput = input.trim().replace(/,\s*$/, '');
+        const array = JSON.parse(cleanInput);
+        
+        if (!Array.isArray(array)) {
+            throw new Error('Input must be an array');
+        }
+        
+        if (array.length === 0) {
+            return 'vector<int> nums;';
+        }
+        
+        if (typeof array[0] === 'string') {
+            // For char arrays (string reversal problem)
+            return `vector<char> s = {${array.map(c => `'${c}'`).join(', ')}};`;
+        } else {
+            // For number arrays
+            return `vector<int> nums = {${array.join(', ')}};`;
+        }
     } catch (error) {
-        throw new Error(`Invalid input format: ${error.message}`);
+        console.error('Input parsing error:', input);
+        throw new Error(`Invalid input format: ${error.message}. Input was: ${input}`);
     }
 }
 
@@ -47,10 +79,12 @@ int main() {
     
     // Print result
     ${code.includes('void') ? 
-        `for(int i = 0; i < s.size(); i++) {
+        `cout << "[";
+        for(int i = 0; i < s.size(); i++) {
             if(i > 0) cout << ",";
             cout << "\\"" << s[i] << "\\"";
-        }` :
+        }
+        cout << "]";` :
         'cout << result;'
     }
     
@@ -58,34 +92,44 @@ int main() {
 }`;
 }
 
-// For Vercel deployment, we'll use a mock execution for now
-// In production, this should be replaced with a proper WebAssembly-based solution
-export async function runCode(code: string, input: string): Promise<string> {
-    // This is a temporary mock implementation
-    // In production, this should be replaced with actual WebAssembly execution
-    const mockResults = {
-        "[-1,0,3,5,9,12], target = 9": "4",
-        "[-1,0,3,5,9,12], target = 2": "-1",
-        "[1, 2, 3, 4, 5]": "15",
-        "[-1, -2, -3]": "-6",
-        '["h","e","l","l","o"]': '["o","l","l","e","h"]',
-        '["H","a","n","n","a","h"]': '["h","a","n","n","a","H"]'
-    };
+export async function compileCpp(code: string): Promise<string> {
+    const filename = `temp_${randomBytes(8).toString('hex')}`;
+    const sourcePath = path.join(process.cwd(), `${filename}.cpp`);
+    const executablePath = path.join(process.cwd(), `${filename}.exe`);
 
-    // Return mock result based on input
-    const result = mockResults[input];
-    if (result) {
-        return result;
+    try {
+        // Write the source code to a file
+        await writeFile(sourcePath, code);
+        
+        // Compile the code
+        await execAsync(`g++ "${sourcePath}" -o "${executablePath}"`);
+        
+        return executablePath;
+    } catch (error: any) {
+        // Clean up the source file
+        await unlink(sourcePath).catch(() => {});
+        throw new Error(`Compilation error: ${error.message}`);
+    } finally {
+        // Clean up the source file
+        await unlink(sourcePath).catch(() => {});
     }
-
-    throw new Error("Invalid test case");
 }
 
-// Updated route handler will use runCode instead of compilation
-export async function handleCodeExecution(code: string, input: string): Promise<string> {
+export async function runExecutable(executablePath: string): Promise<string> {
     try {
-        return await runCode(code, input);
+        // Add a 10 second timeout to prevent infinite loops
+        const { stdout } = await execAsync(`"${executablePath}"`, { 
+            timeout: 10000,  // Changed from 5000 to 10000 ms
+            killSignal: 'SIGTERM'
+        });
+        return stdout.trim();
     } catch (error: any) {
-        throw new Error(`Code execution failed: ${error.message}`);
+        if (error.killed || error.signal === 'SIGTERM') {
+            throw new Error('Code execution timed out. Your code might be stuck in an infinite loop.');
+        }
+        throw error;
+    } finally {
+        // Clean up the executable
+        await unlink(executablePath).catch(() => {});
     }
 } 
